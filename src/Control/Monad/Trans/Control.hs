@@ -7,9 +7,7 @@
            , UndecidableInstances
            , MultiParamTypeClasses #-}
 
-#if __GLASGOW_HASKELL__ >= 702
 {-# LANGUAGE Safe #-}
-#endif
 
 #if MIN_VERSION_transformers(0,4,0)
 -- Hide warnings for the deprecated ErrorT transformer:
@@ -83,7 +81,7 @@ module Control.Monad.Trans.Control
     , ComposeSt, RunInBaseDefault, defaultLiftBaseWith, defaultRestoreM
 
       -- * Utility functions
-    , control, embed, embed_, captureT, captureM
+    , control, controlT, embed, embed_, captureT, captureM
 
     , liftBaseOp, liftBaseOp_
 
@@ -104,11 +102,11 @@ import Control.Monad ( Monad, (>>=), return, liftM )
 import System.IO     ( IO )
 import Data.Maybe    ( Maybe )
 import Data.Either   ( Either )
+import Control.Monad ( void )
+import Prelude       ( id )
 
-#if MIN_VERSION_base(4,4,0)
 import           Control.Monad.ST.Lazy.Safe           ( ST )
 import qualified Control.Monad.ST.Safe      as Strict ( ST )
-#endif
 
 -- from stm:
 import Control.Monad.STM ( STM )
@@ -117,14 +115,17 @@ import Control.Monad.STM ( STM )
 import Control.Monad.Trans.Class    ( MonadTrans )
 
 import Control.Monad.Trans.Identity ( IdentityT(IdentityT), runIdentityT )
-import Control.Monad.Trans.List     ( ListT    (ListT),     runListT )
 import Control.Monad.Trans.Maybe    ( MaybeT   (MaybeT),    runMaybeT )
-import Control.Monad.Trans.Error    ( ErrorT   (ErrorT),    runErrorT, Error )
 import Control.Monad.Trans.Reader   ( ReaderT  (ReaderT),   runReaderT )
 import Control.Monad.Trans.State    ( StateT   (StateT),    runStateT )
 import Control.Monad.Trans.Writer   ( WriterT  (WriterT),   runWriterT )
 import Control.Monad.Trans.RWS      ( RWST     (RWST),      runRWST )
 import Control.Monad.Trans.Except   ( ExceptT  (ExceptT),   runExceptT )
+
+#if !(MIN_VERSION_transformers(0,6,0))
+import Control.Monad.Trans.List     ( ListT    (ListT),     runListT )
+import Control.Monad.Trans.Error    ( ErrorT   (ErrorT),    runErrorT, Error )
+#endif
 
 import qualified Control.Monad.Trans.RWS.Strict    as Strict ( RWST   (RWST),    runRWST )
 import qualified Control.Monad.Trans.State.Strict  as Strict ( StateT (StateT),  runStateT )
@@ -135,15 +136,6 @@ import Data.Functor.Identity ( Identity )
 -- from transformers-base:
 import Control.Monad.Base ( MonadBase )
 
-#if MIN_VERSION_base(4,3,0)
-import Control.Monad ( void )
-#else
-import Data.Functor (Functor, fmap)
-void :: Functor f => f a -> f ()
-void = fmap (const ())
-#endif
-
-import Prelude (id)
 
 --------------------------------------------------------------------------------
 -- MonadTransControl type class
@@ -219,9 +211,9 @@ class MonadTrans t => MonadTransControl t where
   --
   -- Instances should satisfy similar laws as the 'MonadTrans' laws:
   --
-  -- @liftWith . const . return = return@
+  -- @liftWith (\\_ -> return a) = return a@
   --
-  -- @liftWith (const (m >>= f)) = liftWith (const m) >>= liftWith . const . f@
+  -- @liftWith (\\_ -> m >>= f)  =  liftWith (\\_ -> m) >>= (\\a -> liftWith (\\_ -> f a))@
   --
   -- The difference with 'lift' is that before lifting the @m@ computation
   -- @liftWith@ captures the state of @t@. It then provides the @m@
@@ -235,16 +227,16 @@ class MonadTrans t => MonadTransControl t where
   --
   -- If the @Run@ function is ignored, @liftWith@ coincides with @lift@:
   --
-  -- @lift f = liftWith (const f)@
+  -- @lift f = liftWith (\\_ -> f)@
   --
   -- Implementations use the @'Run'@ function associated with a transformer:
   --
   -- @
   -- liftWith :: 'Monad' m => (('Monad' n => 'ReaderT' r n b -> n b) -> m a) -> 'ReaderT' r m a
-  -- liftWith f = 'ReaderT' (\r -> f (\action -> 'runReaderT' action r))
+  -- liftWith f = 'ReaderT' (\\r -> f (\\action -> 'runReaderT' action r))
   --
   -- liftWith :: 'Monad' m => (('Monad' n => 'StateT' s n b -> n (b, s)) -> m a) -> 'StateT' s m a
-  -- liftWith f = 'StateT' (\s -> 'liftM' (\x -> (x, s)) (f (\action -> 'runStateT' action s)))
+  -- liftWith f = 'StateT' (\\s -> 'liftM' (\\x -> (x, s)) (f (\\action -> 'runStateT' action s)))
   --
   -- liftWith :: 'Monad' m => (('Monad' n => 'MaybeT' n b -> n ('Maybe' b)) -> m a) -> 'MaybeT' m a
   -- liftWith f = 'MaybeT' ('liftM' 'Just' (f 'runMaybeT'))
@@ -426,24 +418,26 @@ instance MonadTransControl MaybeT where
     {-# INLINABLE liftWith #-}
     {-# INLINABLE restoreT #-}
 
+#if !(MIN_VERSION_transformers(0,6,0))
+instance MonadTransControl ListT where
+    type StT ListT a = [a]
+    liftWith f = ListT $ liftM return $ f $ runListT
+    restoreT = ListT
+    {-# INLINABLE liftWith #-}
+    {-# INLINABLE restoreT #-}
+
 instance Error e => MonadTransControl (ErrorT e) where
     type StT (ErrorT e) a = Either e a
     liftWith f = ErrorT $ liftM return $ f $ runErrorT
     restoreT = ErrorT
     {-# INLINABLE liftWith #-}
     {-# INLINABLE restoreT #-}
+#endif
 
 instance MonadTransControl (ExceptT e) where
     type StT (ExceptT e) a = Either e a
     liftWith f = ExceptT $ liftM return $ f $ runExceptT
     restoreT = ExceptT
-    {-# INLINABLE liftWith #-}
-    {-# INLINABLE restoreT #-}
-
-instance MonadTransControl ListT where
-    type StT ListT a = [a]
-    liftWith f = ListT $ liftM return $ f $ runListT
-    restoreT = ListT
     {-# INLINABLE liftWith #-}
     {-# INLINABLE restoreT #-}
 
@@ -556,9 +550,14 @@ class MonadBase b m => MonadBaseControl b m | m -> b where
     --
     -- Instances should satisfy similar laws as the 'MonadIO' and 'MonadBase' laws:
     --
-    -- @liftBaseWith . const . return = return@
+    -- @liftBaseWith (\\_ -> return a) = return a@
     --
-    -- @liftBaseWith (const (m >>= f)) = liftBaseWith (const m) >>= liftBaseWith . const . f@
+    -- @liftBaseWith (\\_ -> m >>= f)  =  liftBaseWith (\\_ -> m) >>= (\\a -> liftBaseWith (\\_ -> f a))@
+    --
+    -- As <https://stackoverflow.com/a/58106822/1477667 Li-yao Xia explains>, parametricity
+    -- guarantees that
+    --
+    -- @f <$> liftBaseWith q = liftBaseWith $ \runInBase -> f <$> q runInBase@
     --
     -- The difference with 'liftBase' is that before lifting the base computation
     -- @liftBaseWith@ captures the state of @m@. It then provides the base
@@ -633,10 +632,8 @@ BASE(Identity)
 
 BASE(STM)
 
-#if MIN_VERSION_base(4,4,0)
 BASE(Strict.ST s)
 BASE(       ST s)
-#endif
 
 #undef BASE
 
@@ -719,18 +716,24 @@ defaultRestoreM = restoreT . restoreM
 
 TRANS(IdentityT)
 TRANS(MaybeT)
-TRANS(ListT)
 TRANS(ReaderT r)
 TRANS(Strict.StateT s)
 TRANS(       StateT s)
 TRANS(ExceptT e)
 
-TRANS_CTX(Error e,         ErrorT e)
 TRANS_CTX(Monoid w, Strict.WriterT w)
 TRANS_CTX(Monoid w,        WriterT w)
 TRANS_CTX(Monoid w, Strict.RWST r w s)
 TRANS_CTX(Monoid w,        RWST r w s)
 
+#if !(MIN_VERSION_transformers(0,6,0))
+TRANS(ListT)
+TRANS_CTX(Error e,         ErrorT e)
+#endif
+
+#undef BODY
+#undef TRANS
+#undef TRANS_CTX
 
 --------------------------------------------------------------------------------
 -- * Utility functions
@@ -750,6 +753,13 @@ TRANS_CTX(Monoid w,        RWST r w s)
 control :: MonadBaseControl b m => (RunInBase m b -> b (StM m a)) -> m a
 control f = liftBaseWith f >>= restoreM
 {-# INLINABLE control #-}
+
+-- | Lift a computation and restore the monadic state immediately:
+-- @controlT f = 'liftWith' f >>= 'restoreT' . return@.
+controlT :: (MonadTransControl t, Monad (t m), Monad m)
+         => (Run t -> m (StT t a)) -> t m a
+controlT f = liftWith f >>= restoreT . return
+{-# INLINABLE controlT #-}
 
 -- | Embed a transformer function as an function in the base monad returning a
 -- mutated transformer state.
